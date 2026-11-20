@@ -1,0 +1,66 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-library}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-library_dev}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Library.Api/Dockerfile
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__User: ${RABBITMQ_USER:-library}
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD:-library_dev}
+    ports:
+      - "5078:8080"
+    volumes:
+      - library_data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ..
+      dockerfile: backend/Reservation.Worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__User: ${RABBITMQ_USER:-library}
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD:-library_dev}
+    volumes:
+      - library_data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5500:80"
+    depends_on:
+      - api
+
+volumes:
+  rabbitmq_data:
+  library_data:
