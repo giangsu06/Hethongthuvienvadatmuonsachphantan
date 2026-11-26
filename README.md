@@ -1,67 +1,81 @@
-# Mạch Sách
+# Hệ thống thư viện và đặt mượn sách phân tán
 
-Ứng dụng thư viện gồm frontend tĩnh và backend ASP.NET Core, xử lý yêu cầu đặt mượn bất đồng bộ qua RabbitMQ. SQLite được dùng để lưu sách, bạn đọc và yêu cầu; worker và API cùng dùng `backend/data/library.db`.
+Backend FastAPI sử dụng PostgreSQL để lưu sách, người dùng và yêu cầu; RabbitMQ chuyển yêu cầu `Pending` đến worker để xác nhận `Reserved` hoặc từ chối `Rejected`. Worker xử lý thông điệp có xác nhận, hàng đợi bền vững và cập nhật số bản trong cùng giao dịch cơ sở dữ liệu.
 
-## Chạy hệ thống
+## Chạy bằng Docker Compose
 
-Cần cài Docker Desktop. Compose sẽ dựng frontend, API, worker và RabbitMQ; không cần cài .NET SDK nếu chạy toàn bộ bằng Docker.
-
-1. Từ thư mục dự án, build và khởi động toàn bộ hệ thống:
-
-   ```powershell
-   docker compose -f backend/docker-compose.yml up --build -d
-   ```
-
-2. Mở giao diện:
-
-   `http://localhost:5500`
-
-   API Swagger: `http://localhost:5078/swagger`
-
-   RabbitMQ Management: `http://localhost:15672`
-
-   Tài khoản mặc định cho môi trường demo là `library` / `library_dev`. Có thể ghi đè bằng biến môi trường `RABBITMQ_USER` và `RABBITMQ_PASSWORD`.
-
-3. Xem log hoặc dừng stack:
-
-   ```powershell
-   docker compose -f backend/docker-compose.yml logs -f
-   docker compose -f backend/docker-compose.yml down
-   ```
-
-   Dữ liệu SQLite và RabbitMQ lưu trong Docker volumes; `down` không xóa dữ liệu. Dùng `down -v` khi muốn xóa dữ liệu demo.
-
-Có thể chạy API/worker trực tiếp từ source để phát triển, nhưng cần .NET 10 SDK và RabbitMQ:
+Cần cài Docker Desktop và Docker Compose.
 
 ```powershell
-docker compose -f backend/docker-compose.yml up -d rabbitmq
-dotnet run --project backend/Library.Api/Library.Api.csproj --urls http://localhost:5078
-dotnet run --project backend/Reservation.Worker/Reservation.Worker.csproj
-py -m http.server 5500 --directory frontend
+docker compose up --build -d
+docker compose exec api python -m scripts.seed
 ```
 
-Trang `index.html` ở thư mục gốc cũng chuyển tới frontend này. API mặc định ở `http://localhost:5078`; có thể ghi đè bằng biến `window.MACH_SACH_API_URL` trước script frontend nếu đổi địa chỉ API.
+API: <http://localhost:8000>. Tài liệu tương tác: <http://localhost:8000/docs>.
+
+Giao diện thư viện: <http://localhost:8000/>. Giao diện hỗ trợ đăng nhập/đăng ký, tìm kiếm theo tên sách/tác giả/số điện thoại, lọc tình trạng sách, đặt mượn, theo dõi phiếu, mượn/trả và quản lý thông tin đầu sách.
+
+Tài khoản mẫu: `an@example.com` / `123456`.
+
+Dữ liệu mẫu gồm người dùng `user-001` và sách `Clean Code`. Các ISBN cũ được lưu lại nội bộ khi chuyển sang trường số điện thoại.
+
+## Chạy API cục bộ
+
+Cần có PostgreSQL và RabbitMQ đang chạy. Tạo môi trường ảo rồi cài các gói:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+$env:DATABASE_URL = "postgresql+psycopg://library:library@localhost:5432/library"
+$env:AMQP_URL = "amqp://guest:guest@localhost:5672/%2F"
+python -m scripts.seed
+```
+
+Mở hai terminal đã kích hoạt môi trường ảo:
+
+```powershell
+uvicorn app.main:app --reload
+```
+
+```powershell
+python -m app.worker
+```
 
 ## API
 
-| Method | Route | Mô tả |
-| --- | --- | --- |
-| GET | `/books` | Danh mục và số bản khả dụng |
-| GET | `/books/{id}` | Chi tiết sách |
-| POST | `/reservations` | Tạo yêu cầu `Pending`, phát message vào RabbitMQ |
-| GET | `/reservations/{id}` | Tra cứu trạng thái yêu cầu |
-| GET | `/users/{userId}/reservations` | Danh sách yêu cầu của bạn đọc |
-| PATCH | `/reservations/{id}/borrow` | Xác nhận nhận sách đã giữ |
-| PATCH | `/reservations/{id}/return` | Ghi nhận trả sách và tăng số bản khả dụng |
+| Method | Path | Mô tả |
+|---|---|---|
+| `GET` | `/books?q=clean&limit=50&offset=0` | Tìm sách theo tên sách/tác giả/số điện thoại; trả số bản khả dụng |
+| `GET` | `/books/{id}` | Chi tiết sách và số bản khả dụng |
+| `PATCH` | `/books/{id}` | Cập nhật thông tin, số điện thoại hoặc số lượng bản sách; không cho giảm thấp hơn số bản đang giữ/đang mượn |
+| `DELETE` | `/books/{id}` | Xóa sách chưa có lịch sử đặt mượn |
+| `POST` | `/reservations` | Gửi yêu cầu; trả `202 Accepted` với trạng thái ban đầu `Pending` |
+| `GET` | `/reservations/{id}` | Tra cứu trạng thái yêu cầu |
+| `GET` | `/users/{userId}/reservations?status=Reserved` | Danh sách đặt mượn/đang mượn của người dùng |
+| `POST` | `/reservations/{id}/borrow` | Chuyển yêu cầu `Reserved` thành `Borrowed` |
+| `POST` | `/reservations/{id}/return` | Chuyển yêu cầu `Borrowed` thành `Returned` |
+| `POST` | `/users` | Tạo người dùng |
+| `POST` | `/books` | Tạo sách |
+| `POST` | `/auth/register` | Đăng ký tài khoản |
+| `POST` | `/auth/login` | Đăng nhập bằng email và mật khẩu |
 
-JSON tạo yêu cầu:
+Ví dụ tạo yêu cầu:
 
 ```json
 {
-  "bookId": "BK001",
-  "userId": "DG001",
-  "userName": "An Nguyễn"
+  "user_id": "user-001",
+  "book_id": 1
 }
 ```
 
-Trạng thái xử lý: `Pending`, `Reserved`, `Rejected`, `Borrowed`, `Returned`. RabbitMQ Management UI khả dụng tại `http://localhost:15672` với tài khoản `guest` / `guest` khi chạy cấu hình phát triển này.
+Worker chỉ giữ bản khi còn bản khả dụng; nếu hết sách, yêu cầu chuyển sang `Rejected` và có `rejection_reason`. Số bản khả dụng được tính bằng tổng số bản trừ bản đã giữ và bản đang mượn. Lỗi kết nối RabbitMQ khi gửi yêu cầu trả `503`; trạng thái yêu cầu được lưu là `Rejected` để không còn yêu cầu `Pending` bị bỏ quên.
+
+## Kiểm thử
+
+```powershell
+pip install -r requirements.txt
+pytest
+```
+
+Các endpoint tạo người dùng/sách hiện không có xác thực, phù hợp cho bài tập và môi trường demo. Trước khi triển khai thực tế, cần bổ sung xác thực và phân quyền.
